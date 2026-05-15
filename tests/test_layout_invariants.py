@@ -1907,3 +1907,93 @@ def test_row_gap_accommodates_bypass(fixture):
         f"{fixture}: row gap must be >= section_y_gap for every "
         f"column-overlapping pair: " + "; ".join(offenders)
     )
+
+
+@pytest.mark.parametrize("fixture", ["da_pipeline.mmd"])
+def test_section_clears_upper_row_bypass_route(fixture):
+    """Sections in row ``r + 1`` must sit clear of bypass routes that
+    descend below row ``r`` sections.
+
+    Section 4 (plots) in the differentialabundance pipeline lives in
+    row 1, directly below section 3 (functional) whose lower band
+    carries U-shaped bypass routes from differential through the
+    inter-section gap.  Without ``_push_lower_rows_after_bbox_grow``
+    accounting for the predicted bypass depth, section 4's header sat
+    only ~14 px below the bypass low point, leaving no visual gap.
+
+    Tested at ``y_spacing=55`` and ``section_y_gap=50`` because the
+    production DA render uses that pitch; the default values absorb
+    the bypass within row-0's taller rowspan section, hiding the
+    regression.
+    """
+    from nf_metro.layout.constants import SECTION_HEADER_PROTRUSION
+
+    graph = _layout(fixture, y_spacing=55)
+    routes = route_edges(graph)
+
+    # Collect (route_min_y, route_max_y, col_lo, col_hi, row_src)
+    # for every routed bypass-style path (a path that travels below
+    # the source section bbox bottom).
+    sections = graph.sections
+    junction_ids = set(graph.junctions)
+
+    def _section_of(node_id: str):
+        st = graph.stations.get(node_id) or graph.ports.get(node_id)
+        if st is None:
+            return None
+        sec_id = getattr(st, "section_id", None)
+        if sec_id:
+            return sections.get(sec_id)
+        return None
+
+    bypass_max_y_per_row: dict[int, float] = defaultdict(lambda: 0.0)
+    for route in routes:
+        if not route.is_inter_section:
+            continue
+        src_sec = _section_of(route.edge.source)
+        tgt_sec = _section_of(route.edge.target)
+        # Need at least one endpoint section for a row anchor; use
+        # whichever resolves and verify both rows are the same.
+        anchor_row = None
+        if src_sec is not None and tgt_sec is not None:
+            if src_sec.grid_row != tgt_sec.grid_row:
+                continue
+            anchor_row = src_sec.grid_row
+        elif src_sec is not None:
+            anchor_row = src_sec.grid_row
+        elif tgt_sec is not None:
+            anchor_row = tgt_sec.grid_row
+        else:
+            continue
+        if anchor_row is None:
+            continue
+        max_y = max(y for _, y in route.points)
+        if max_y > bypass_max_y_per_row[anchor_row]:
+            bypass_max_y_per_row[anchor_row] = max_y
+
+    # For each lower-row section, assert its header top sits clear of
+    # the upper-row bypass low point.  The visible clearance budget is
+    # one section_y_gap: half above the bypass, half below the header
+    # is too aggressive, so we require the full gap between bypass low
+    # and the lower-row header top (bbox_y - SECTION_HEADER_PROTRUSION).
+    offenders: list[str] = []
+    safety_margin = 5.0  # absorb sub-pixel curve radii at the corner
+    for sec_id, sec in sections.items():
+        if sec.grid_row < 1 or sec.bbox_h <= 0:
+            continue
+        upper_max = bypass_max_y_per_row.get(sec.grid_row - 1)
+        if not upper_max:
+            continue
+        header_top = sec.bbox_y - SECTION_HEADER_PROTRUSION
+        clearance = header_top - upper_max
+        if clearance + safety_margin < 0:
+            offenders.append(
+                f"section {sec_id!r}: header_top={header_top:.1f} sits "
+                f"only {clearance:.1f}px below upper-row bypass low "
+                f"(y={upper_max:.1f})"
+            )
+
+    assert not offenders, (
+        f"{fixture}: lower-row sections must clear upper-row bypass "
+        f"routes: " + "; ".join(offenders)
+    )

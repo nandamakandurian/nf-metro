@@ -11,6 +11,7 @@ import math
 from collections import Counter, defaultdict
 
 from nf_metro.layout.constants import (
+    BYPASS_CLEARANCE,
     CURVE_RADIUS,
     DIAGONAL_RUN,
     ENTRY_SHIFT_LR,
@@ -2624,6 +2625,86 @@ def _shift_sparse_loop_stations_to_clear_bundle(
             st.y = new_y
 
 
+def _predicted_bypass_bottom_in_row(
+    graph: MetroGraph, row: int
+) -> float:
+    """Predict the deepest Y a bypass route may reach in the given row.
+
+    A bypass U-route is emitted at routing time when an edge spans
+    two or more columns AND has same-row intervening sections (see
+    ``layout.routing.core._has_intervening_sections`` and the
+    ``needs_bypass`` check).  This pre-routing prediction mirrors
+    that condition, walking junction predecessors/successors to
+    resolve the effective source/target column for edges that pass
+    through junction stations, and computes the same bottom Y
+    formula used in ``layout.routing.common.bypass_bottom_y``: the
+    deepest intervening section bottom plus ``BYPASS_CLEARANCE``.
+
+    Returns 0.0 when no bypass is expected.
+    """
+    sections_in_row = [
+        s for s in graph.sections.values()
+        if s.grid_row == row and s.bbox_w > 0
+    ]
+    if not sections_in_row:
+        return 0.0
+
+    # Build predecessor/successor maps for junction resolution.
+    successors: dict[str, list[str]] = defaultdict(list)
+    predecessors: dict[str, list[str]] = defaultdict(list)
+    for e in graph.edges:
+        successors[e.source].append(e.target)
+        predecessors[e.target].append(e.source)
+
+    def _node_section(node_id: str) -> Section | None:
+        st = graph.stations.get(node_id) or graph.ports.get(node_id)
+        if st is None:
+            return None
+        sec_id = getattr(st, "section_id", None)
+        if sec_id:
+            return graph.sections.get(sec_id)
+        return None
+
+    def _resolve_via_graph(
+        node_id: str, direction: str, visited: set[str] | None = None
+    ) -> Section | None:
+        """Walk junction predecessors/successors until a section is found."""
+        if visited is None:
+            visited = set()
+        if node_id in visited:
+            return None
+        visited.add(node_id)
+        sec = _node_section(node_id)
+        if sec is not None:
+            return sec
+        # Walk upstream for src side, downstream for tgt side.
+        neighbors = predecessors[node_id] if direction == "src" else successors[node_id]
+        for nb in neighbors:
+            sec = _resolve_via_graph(nb, direction, visited)
+            if sec is not None:
+                return sec
+        return None
+
+    deepest = 0.0
+    for edge in graph.edges:
+        src_sec = _resolve_via_graph(edge.source, "src")
+        tgt_sec = _resolve_via_graph(edge.target, "tgt")
+        if src_sec is None or tgt_sec is None:
+            continue
+        if src_sec.grid_row != row or tgt_sec.grid_row != row:
+            continue
+        if abs(src_sec.grid_col - tgt_sec.grid_col) <= 1:
+            continue
+        lo, hi = sorted((src_sec.grid_col, tgt_sec.grid_col))
+        intervening = [s for s in sections_in_row if lo < s.grid_col < hi]
+        if not intervening:
+            continue
+        bot = max(s.bbox_y + s.bbox_h for s in intervening) + BYPASS_CLEARANCE
+        if bot > deepest:
+            deepest = bot
+    return deepest
+
+
 def _push_lower_rows_after_bbox_grow(
     graph: MetroGraph, section_y_gap: float
 ) -> None:
@@ -2637,11 +2718,18 @@ def _push_lower_rows_after_bbox_grow(
     closer than ``section_y_gap`` from the new bbox bottom.
 
     For each row ``r >= 1``, measure the deficit between the lowest
-    bbox bottom of sections ending at row ``r - 1`` plus
-    ``section_y_gap`` and the topmost bbox top of sections starting
-    at row ``r``.  If positive, shift row ``r`` and below downward by
-    that deficit (sections + their stations + their ports).  Junctions
-    live in inter-section space and are reproduced by routing.
+    bbox bottom of sections ending at row ``r - 1`` (or any predicted
+    bypass route bottom in that row) plus ``section_y_gap`` and the
+    topmost bbox top of sections starting at row ``r``.  If positive,
+    shift row ``r`` and below downward by that deficit (sections +
+    their stations + their ports).  Junctions live in inter-section
+    space and are reproduced by routing.
+
+    Bypass routes (cross-column edges in the same row that descend
+    below intervening sections) live in the inter-row gap.  Without
+    accounting for them, ``current_top`` ends up only ``section_y_gap``
+    below the bbox bottom, leaving the bypass route to overlap with
+    the next row's header.
     """
     if not graph.sections:
         return
@@ -2666,6 +2754,11 @@ def _push_lower_rows_after_bbox_grow(
         if not ending_at_prev:
             continue
         max_above_bot = max(s.bbox_y + s.bbox_h for s in ending_at_prev)
+        # Also account for bypass routes descending into the inter-row
+        # gap (predicted from cross-column edges in row r-1).
+        bypass_bot = _predicted_bypass_bottom_in_row(graph, r - 1)
+        if bypass_bot > max_above_bot:
+            max_above_bot = bypass_bot
         current_top = min(s.bbox_y for s in lower if s.bbox_h > 0)
         deficit = (max_above_bot + section_y_gap) - current_top
         if deficit <= 0.5:

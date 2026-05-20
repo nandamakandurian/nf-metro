@@ -22,7 +22,6 @@ from nf_metro.layout.constants import (
     FOLD_MARGIN,
     ICON_TERMINUS_FORK_LEAD,
     JUNCTION_MARGIN,
-    MERGE_ROUTE_MARGIN,
     MIN_STATION_FLAT_LENGTH,
     MIN_STRAIGHT_EDGE,
     MIN_STRAIGHT_PORT,
@@ -35,7 +34,6 @@ from nf_metro.layout.routing.common import (
     Direction,
     RoutedPath,
     bypass_bottom_y,
-    col_left_edge,
     col_right_edge,
     column_gap_midpoint,
     compute_bundle_info,
@@ -173,6 +171,7 @@ def route_edges(
 
     _center_bubble_stations(routes, graph)
     _spread_diagonal_bundles(routes, ctx)
+    _trim_upstream_to_downstream_start(graph, routes)
 
     return routes
 
@@ -721,8 +720,9 @@ def _route_merge_branch(
     """Truncated L-shape descent from a junction to the trunk level.
 
     Routes a 4-point path: horizontal lead-in, curve down, vertical
-    drop, curve into trunk direction.  The lead-in is positioned at
-    MERGE_ROUTE_MARGIN from the source section edge.
+    drop, curve into trunk direction.  The descent X aligns with the
+    inter-column gap midpoint so the branch's V_down coincides with
+    any trunk V_up sharing the same gap.
     """
     sx, sy = src.x, src.y
     dx = ctx.graph.stations[edge.target].x - sx
@@ -732,24 +732,28 @@ def _route_merge_branch(
     # Trunk bypass Y level (branches drop to meet it)
     by = ctx.merge.trunk_by.get(edge.target, sy)
 
-    # Position descent at MERGE_ROUTE_MARGIN from section edge
+    # Position descent at the inter-column gap midpoint so the branch's
+    # V_down aligns with the trunk's V_up in the same gap.  When the
+    # midpoint sits closer than curve_radius to the source, extend
+    # pts[0] back by curve_radius so the first corner gets a full
+    # lead-in segment; the upstream port -> junction route's trim pass
+    # shortens its tail to match pts[0] (same line colour, invisible).
     if horizontal is Direction.R:
-        lead_x = col_right_edge(ctx.graph, src_col) + MERGE_ROUTE_MARGIN
+        lead_x = column_gap_midpoint(ctx.graph, src_col, src_col + 1)
     else:
-        lead_x = col_left_edge(ctx.graph, src_col) - MERGE_ROUTE_MARGIN
-    # Clamp to at least curve_radius from the junction
-    min_lead = sx + horizontal.sign * ctx.curve_radius
-    if horizontal is Direction.R:
-        lead_x = max(lead_x, min_lead)
+        lead_x = column_gap_midpoint(ctx.graph, src_col - 1, src_col)
+    available_lead = (lead_x - sx) * horizontal.sign
+    if available_lead < ctx.curve_radius:
+        leadin_x = lead_x - horizontal.sign * ctx.curve_radius
     else:
-        lead_x = min(lead_x, min_lead)
+        leadin_x = sx
     tail_x = lead_x + horizontal.sign * ctx.curve_radius * 2
 
     return RoutedPath(
         edge=edge,
         line_id=edge.line_id,
         points=[
-            (sx, sy + src_off),
+            (leadin_x, sy + src_off),
             (lead_x, sy + src_off),
             (lead_x, by),
             (tail_x, by),
@@ -780,9 +784,17 @@ def _has_around_section_sibling(
     """
     if ep_port is None or ep_port.side != PortSide.LEFT:
         return False
-    # Find all edges whose target is the same merge junction.
-    for other in ctx.graph.edges_to(edge.target):
+    # Around-section routes only fire for non-merge edges targeting the
+    # entry port directly.  Edges into the merge junction itself dispatch
+    # to ``_route_merge_branch`` / ``_route_merge_trunk`` and never go
+    # around-section, so iterating ``edges_to(merge_junction)`` is the
+    # wrong universe.
+    junction_ids = ctx.junction_ids
+    for other in ctx.graph.edges_to(ep.id):
         if other.source == edge.source:
+            continue
+        # Skip the merge-junction-to-entry-port forwarding edge.
+        if other.source in junction_ids:
             continue
         other_src = ctx.graph.stations.get(other.source)
         if other_src is None:
@@ -958,15 +970,15 @@ def _route_bypass(
 
     # Gap channel centers and per-line positions.
     base_bypass_offset = ctx.curve_radius + ctx.offset_step
-    half_g1 = (g1_n - 1) * ctx.offset_step / 2
     half_g2 = (g2_n - 1) * ctx.offset_step / 2
 
     if horizontal is Direction.R:
         if fan is not None:
             # Corner 1 uses unified fan indices for a shared first corner
-            # with L-shape and wrap siblings.  Use the going_right
-            # fan_mid_x formula so curve_start = gap1_x - r1 = junction.x,
-            # eliminating the upstream-past-curve "nubbin".
+            # with L-shape and wrap siblings.  Centre the bundle on the
+            # source-side column gap midpoint; the lead-in extension at
+            # the bottom of this function backs pts[0] up by curve_radius
+            # when the bundle's outer line sits behind the source.
             ui, un = fan
             fan_delta, r1, _ = l_shape_radii(
                 ui,
@@ -975,17 +987,13 @@ def _route_bypass(
                 offset_step=ctx.offset_step,
                 base_radius=ctx.curve_radius,
             )
-            fan_mid_x = sx + ctx.curve_radius + (un - 1) * ctx.offset_step / 2
-            gap1_x = fan_mid_x + fan_delta
+            gap1_x = column_gap_midpoint(graph, src_col, src_col + 1) + fan_delta
         else:
-            gap1_base = (
-                column_gap_midpoint(graph, src_col, src_col + 1) - base_bypass_offset
-            )
-            gap1_limit = sx + ctx.curve_radius
-            if gap1_base - (g1_n - 1) * ctx.offset_step < gap1_limit:
-                gap1_mid = gap1_limit + half_g1
-            else:
-                gap1_mid = gap1_base - half_g1
+            # Centre the gap1 bundle on the source-side column gap
+            # midpoint.  The lead-in extension at the bottom of this
+            # function backs pts[0] up by curve_radius when the bundle
+            # straddles the source's X.
+            gap1_mid = column_gap_midpoint(graph, src_col, src_col + 1)
             gap1_x = gap1_mid + delta1
 
         gap2_base = (
@@ -1037,21 +1045,12 @@ def _route_bypass(
                 offset_step=ctx.offset_step,
                 base_radius=ctx.curve_radius,
             )
-            # Shared first corner with curve_start at junction.x (see
-            # going_right branch).  Same formula since the wrap's
-            # source-side curve is on the OUTSIDE (right) of the
-            # source section regardless of dx sign.
-            fan_mid_x = sx + ctx.curve_radius + (un - 1) * ctx.offset_step / 2
-            gap1_x = fan_mid_x + fan_delta
+            gap1_x = column_gap_midpoint(graph, src_col - 1, src_col) + fan_delta
         else:
-            gap1_base = (
-                column_gap_midpoint(graph, src_col - 1, src_col) + base_bypass_offset
-            )
-            gap1_limit = sx - ctx.curve_radius
-            if gap1_base + (g1_n - 1) * ctx.offset_step > gap1_limit:
-                gap1_mid = gap1_limit - half_g1
-            else:
-                gap1_mid = gap1_base + half_g1
+            # Centre the gap1 bundle on the source-side column gap
+            # midpoint; the lead-in extension below absorbs any
+            # bundle that straddles the source's X.
+            gap1_mid = column_gap_midpoint(graph, src_col - 1, src_col)
             gap1_x = gap1_mid + delta1
 
         gap2_base = (
@@ -1069,11 +1068,21 @@ def _route_bypass(
     src_off = _get_offset(ctx, edge.source, edge.line_id)
     tgt_off = _get_offset(ctx, edge.target, edge.line_id)
 
+    # If the gap1 channel ended up behind the source (typical for
+    # junction sources whose JUNCTION_MARGIN places them past the
+    # gap midpoint), extend pts[0] back by curve_radius so the
+    # first segment is forward-going.  The upstream port -> junction
+    # route's trim pass shortens its tail to match.
+    if (gap1_x - sx) * horizontal.sign < ctx.curve_radius:
+        start_pt = (gap1_x - horizontal.sign * ctx.curve_radius, sy + src_off)
+    else:
+        start_pt = (sx, sy + src_off)
+
     return RoutedPath(
         edge=edge,
         line_id=edge.line_id,
         points=[
-            (sx, sy + src_off),
+            start_pt,
             (gap1_x, sy + src_off),
             (gap1_x, by),
             (gap2_x, by),
@@ -2430,6 +2439,55 @@ def _is_diagonal_route(rp: RoutedPath) -> bool:
     dx = abs(rp.points[1][0] - rp.points[2][0])
     dy = abs(rp.points[1][1] - rp.points[2][1])
     return dx >= COORD_TOLERANCE and dy >= COORD_TOLERANCE_FINE
+
+
+def _trim_upstream_to_downstream_start(
+    graph: MetroGraph, routes: list[RoutedPath]
+) -> None:
+    """Trim each upstream port->junction route's last point to align
+    with the matching downstream junction->target route's first point.
+
+    When a fan-out junction's downstream L-shape / bypass extends
+    pts[0] back into the source-side curve_radius (to satisfy "first
+    segment must be forward-going"), the upstream port->junction
+    route still terminates at ``junction.x`` -- leaving a horizontal
+    stub past where the downstream curve has already started bending
+    away.  Shortening the upstream's last point to match the
+    downstream's pts[0] removes the stub without visually shifting
+    either endpoint.
+
+    Matching is per line_id.  Only horizontal upstream tails are
+    trimmed (last segment must be on the same Y as the downstream's
+    pts[0]).  Merge junctions (more than one upstream source) are
+    skipped: their trunk routes are intentionally drawn through the
+    merge to the downstream entry port.
+    """
+    by_key: dict[tuple[str, str, str], RoutedPath] = {
+        (r.edge.source, r.edge.target, r.line_id): r for r in routes
+    }
+    for jid in graph.junction_ids:
+        upstream_edges = list(graph.edges_to(jid))
+        upstream_sources = {e.source for e in upstream_edges}
+        if len(upstream_sources) > 1:
+            continue
+        for down_edge in graph.edges_from(jid):
+            down = by_key.get((down_edge.source, down_edge.target, down_edge.line_id))
+            if down is None or len(down.points) < 2:
+                continue
+            down_start = down.points[0]
+            for up_edge in upstream_edges:
+                if up_edge.line_id != down_edge.line_id:
+                    continue
+                up = by_key.get((up_edge.source, up_edge.target, up_edge.line_id))
+                if up is None or len(up.points) < 2:
+                    continue
+                last = up.points[-1]
+                prev = up.points[-2]
+                # Only horizontal upstream tails: a vertical drop is the
+                # downstream's own first segment, not a trimmable lead-in.
+                if abs(prev[1] - last[1]) >= 1.0:
+                    continue
+                up.points[-1] = (down_start[0], last[1])
 
 
 def _spread_diagonal_bundles(routes: list[RoutedPath], ctx: _RoutingCtx) -> None:

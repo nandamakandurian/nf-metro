@@ -4,9 +4,6 @@ Covers:
 
 * Happy-path: every gallery fixture and example yields zero violations
   when passed through :func:`check_bundle_order_preserved`.
-* Helper-level negative: the per-pair side-relation primitive returns
-  the expected LEFT / RIGHT / COINCIDENT verdicts for hand-built
-  inputs.
 * Route-level negative: a synthetic ``RoutedPath`` pair with a
   hand-crafted flipped corner correctly surfaces as a violation.
 """
@@ -23,9 +20,6 @@ from nf_metro.layout.routing.common import Direction, RoutedPath
 from nf_metro.layout.routing.invariants import (
     BundleOrderViolation,
     Side,
-    _left_of,
-    _relative_side,
-    _segment_direction,
     check_bundle_order_preserved,
 )
 from nf_metro.parser.mermaid import parse_metro_mermaid
@@ -86,79 +80,11 @@ def test_no_bundle_order_violations_in_gallery(path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Helper-level unit tests
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "p1, p2, expected",
-    [
-        ((0.0, 0.0), (10.0, 0.0), Direction.R),
-        ((10.0, 0.0), (0.0, 0.0), Direction.L),
-        ((0.0, 0.0), (0.0, 10.0), Direction.D),
-        ((0.0, 10.0), (0.0, 0.0), Direction.U),
-        ((0.0, 0.0), (10.0, 10.0), None),  # diagonal, not cardinal
-        ((0.0, 0.0), (0.0, 0.0), None),  # degenerate
-    ],
-)
-def test_segment_direction(p1, p2, expected) -> None:
-    """``_segment_direction`` returns the cardinal direction for an
-    axis-aligned segment and ``None`` otherwise.
-
-    The fine-tolerance test is implicit in the inputs: a segment with
-    any non-trivial off-axis component returns ``None``.
-    """
-    assert _segment_direction(p1, p2) is expected
-
-
-@pytest.mark.parametrize(
-    "tangent, expected_left",
-    [
-        (Direction.R, Direction.U),
-        (Direction.U, Direction.L),
-        (Direction.L, Direction.D),
-        (Direction.D, Direction.R),
-    ],
-)
-def test_left_of_is_quarter_turn_ccw(
-    tangent: Direction, expected_left: Direction
-) -> None:
-    """``_left_of`` is a quarter-turn anti-clockwise in screen coords."""
-    assert _left_of(tangent) is expected_left
-
-
-@pytest.mark.parametrize(
-    "a, b, side_dir, expected",
-    [
-        # +x axis (R): A LEFT iff A.x > B.x
-        ((5.0, 0.0), (0.0, 0.0), Direction.R, Side.LEFT),
-        ((0.0, 0.0), (5.0, 0.0), Direction.R, Side.RIGHT),
-        ((0.0, 0.0), (0.0, 0.0), Direction.R, Side.COINCIDENT),
-        # -y axis (U): A LEFT iff A.y < B.y
-        ((0.0, 0.0), (0.0, 5.0), Direction.U, Side.LEFT),
-        ((0.0, 5.0), (0.0, 0.0), Direction.U, Side.RIGHT),
-        # +y axis (D): A LEFT iff A.y > B.y
-        ((0.0, 5.0), (0.0, 0.0), Direction.D, Side.LEFT),
-        # -x axis (L): A LEFT iff A.x < B.x
-        ((0.0, 0.0), (5.0, 0.0), Direction.L, Side.LEFT),
-    ],
-)
-def test_relative_side(a, b, side_dir, expected) -> None:
-    """``_relative_side`` projects ``a - b`` onto the unit vector
-    pointing in ``side_dir`` and returns LEFT for positive projection,
-    RIGHT for negative, COINCIDENT when within tolerance.
-    """
-    assert _relative_side(a, b, side_dir) == expected
-
-
-# ---------------------------------------------------------------------------
 # Route-level negative test: a synthetic flipped corner is caught
 # ---------------------------------------------------------------------------
 
 
-def _synthetic_route(
-    line_id: str, points: list[tuple[float, float]]
-) -> RoutedPath:
+def _synthetic_route(line_id: str, points: list[tuple[float, float]]) -> RoutedPath:
     """Build a ``RoutedPath`` from a points list for testing.
 
     Source/target IDs are fixed (``'__src__'``, ``'__tgt__'``) so the
@@ -197,28 +123,10 @@ def test_synthetic_flipped_corner_is_caught() -> None:
     """A hand-crafted bundle with a deliberate flip at a near-shared
     corner surfaces as a :class:`BundleOrderViolation`.
 
-    Construction: two L-shape routes whose corners sit within
-    ``_CLUSTER_TOLERANCE`` (= ``COORD_TOLERANCE``, 1 px) of each
-    other - tight enough that real bundles (offset by
-    ``OFFSET_STEP`` = 3 px) never cluster together, loose enough
-    that this sub-pixel-offset synthetic case does.
-
-    Line A's elbow is at ``(100, 100)``, line B's is at
-    ``(100.5, 100.5)``.  The approach segments are both R (going
-    east, dy=0 at the elbow); the exit segments are both D (going
-    south, dx=0).  Because the elbows differ in *both* x and y by
-    half a pixel, A and B sit on opposite sides of each other on
-    the incoming run (B is below A) AND opposite sides on the
-    outgoing run (B is right of A).
-
-    The expected verdict per ``_left_of`` semantics:
-
-    * incoming R, left = U (smaller y is LEFT): A.y=100 < B.y=100.5
-      so A is LEFT before.
-    * outgoing D, left = R (larger x is LEFT): A.x=100 < B.x=100.5
-      so A is RIGHT after.
-
-    LEFT->RIGHT is exactly the flip the invariant exists to catch.
+    Two L-shape routes whose elbows are half a pixel apart on both
+    axes: A is on the LEFT of B going east, then on the RIGHT going
+    south.  LEFT -> RIGHT is exactly the flip the invariant exists to
+    catch.
     """
     a_pts = [
         (0.0, 100.0),
@@ -232,9 +140,7 @@ def test_synthetic_flipped_corner_is_caught() -> None:
     ]
     routes = [_synthetic_route("A", a_pts), _synthetic_route("B", b_pts)]
     violations = check_bundle_order_preserved(routes)
-    assert violations, (
-        "expected a synthetic bundle-order violation; got an empty list"
-    )
+    assert violations, "expected a synthetic bundle-order violation; got an empty list"
     v = violations[0]
     assert v.line_a == "A" and v.line_b == "B"
     assert v.in_tangent is Direction.R

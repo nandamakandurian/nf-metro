@@ -1,83 +1,21 @@
-"""Inter-section routing descriptor scaffolding.
+"""Declarative inter-section routing descriptors.
 
-This module exists to give a *declarative* counterpart to the
-imperative ``_route_inter_section`` dispatcher in ``core.py``.
+:data:`WRAP_TABLE` catalogues the corner sequence each handler in
+``core.py`` produces, keyed by ``(exit_side, entry_side, drow_sign,
+dcol_sign)``.  ``exit_side`` is ``None`` when the source is a
+junction without a port side; ``drow_sign`` / ``dcol_sign`` are
+``sign()`` values in ``{-1, 0, +1}``.
 
-Reading the table
-=================
+The table is a documentation reference: nothing in routing consumes
+it at runtime.  Bundle ordering across complex paths is preserved
+by the per-corner offset propagation inside the wrap-route
+handlers (handedness-aware radii at each turn); the runtime
+:func:`~nf_metro.layout.routing.invariants.check_bundle_order_preserved`
+guard catches any regression.
 
-:data:`WRAP_TABLE` is keyed by
-
-    (exit_side, entry_side, drow_sign, dcol_sign)
-
-where:
-
-* ``exit_side``  - side of the source section that the edge leaves
-  from (or ``"JUNCTION"`` when the source is a junction with no port
-  side).
-* ``entry_side`` - side of the target section that the edge arrives
-  at (one of ``TOP``, ``BOTTOM``, ``LEFT``, ``RIGHT``).
-* ``drow_sign`` - ``sign(tgt_row - src_row)`` (-1, 0, +1).  Captures
-  whether the edge wraps to a row above (``-1``), stays in the same
-  row (``0``), or descends to a row below (``+1``).
-* ``dcol_sign`` - ``sign(tgt_col - src_col)`` (-1, 0, +1).
-
-The value is a :class:`WrapDescriptor` that records the corner
-sequence the existing handler produces and, crucially, the **parity**
-of that sequence's handedness changes.
-
-Why parity matters
-==================
-
-When a route's corner list has an odd number of handedness changes
-(CW->CCW transitions), the bundle's outer/inner ordering reverses
-between source and target.  That is the same parity that
-``_propagate_wrap_flip_parity`` in ``engine.py`` propagates along the
-section DAG to set ``Section.flip_lines``.  If the descriptor table's
-parity ever disagrees with the engine's propagator, one of them is
-wrong and the routes will visibly cross at the entry-port
-quarter-circles.  See the alignment test in
-``tests/test_inter_section_descriptor.py``.
-
-Scope
-=====
-
-This module is **scaffolding only** in the current commit:
-
-* The dispatcher in ``core.py`` still uses its existing if-cascade.
-* :data:`WRAP_TABLE` is a forward declaration so future work
-  (B1's next iteration on dispatcher integration, then C1/C2's
-  parity unification) can cross-reference "what corner sequence does
-  case X produce" without diving into 200 lines of dispatcher logic.
-* :class:`Direction` lives in ``common.py`` so future runtime code
-  outside this module can adopt it without importing the descriptor
-  scaffolding.
-
-Known drift (deliberate omissions from ``WRAP_TABLE``)
-======================================================
-
-The dispatcher's if-cascade fires for some same-row and degenerate
-combinations whose geometric corner count disagrees with the
-propagator's row-based ``is_wrap`` flag:
-
-* Same-row L-shapes ``("RIGHT", "LEFT", 0, 1)``,
-  ``("LEFT", "RIGHT", 0, -1)``: the route has one handedness change
-  geometrically (parity = True) but ``is_wrap`` = False because the
-  edge stays in one row.
-* Same-row right-entry wrap ``("LEFT", "RIGHT", 0, 1)``: same drift.
-* Same-row TOP entry ``("RIGHT", "TOP", 0, 1)``: same drift.
-* TB BOTTOM->TOP same-column straight drop
-  ``("BOTTOM", "TOP", 1, 0)``: zero corners (parity = False) but
-  ``is_wrap`` = True.
-
-These cases are excluded from ``WRAP_TABLE`` so the alignment test
-in ``tests/test_inter_section_descriptor.py`` stays green.  They are
-the *first* concrete drift the C1/C2 unification work needs to
-resolve: either the propagator's ``is_wrap`` flag becomes
-geometry-aware (counting corner sequences instead of row deltas),
-or the descriptor's parity definition adopts the row-delta
-convention.  The choice is part of the design discussion, not this
-commit's scope.
+Same-row L-shapes and the TB ``(BOTTOM, TOP, 1, 0)`` straight drop
+are absent because they're degenerate cases the wrap handlers
+don't fire on; the dispatcher's if-cascade handles them directly.
 """
 
 from __future__ import annotations
@@ -87,6 +25,7 @@ from enum import Enum
 from functools import cached_property
 
 from nf_metro.layout.routing.common import Direction
+from nf_metro.parser.model import PortSide
 
 # ---------------------------------------------------------------------------
 # Corner / turn-sequence primitives
@@ -108,6 +47,24 @@ class CornerHandedness(Enum):
     CCW = "CCW"
 
 
+_CW_TURNS: frozenset[tuple[Direction, Direction]] = frozenset(
+    {
+        (Direction.R, Direction.D),
+        (Direction.D, Direction.L),
+        (Direction.L, Direction.U),
+        (Direction.U, Direction.R),
+    }
+)
+_CCW_TURNS: frozenset[tuple[Direction, Direction]] = frozenset(
+    {
+        (Direction.R, Direction.U),
+        (Direction.U, Direction.L),
+        (Direction.L, Direction.D),
+        (Direction.D, Direction.R),
+    }
+)
+
+
 @dataclass(frozen=True)
 class Corner:
     """A single right-angle corner in a routed path.
@@ -118,20 +75,37 @@ class Corner:
         Direction the route is travelling as it enters the corner.
     out_tangent:
         Direction it travels as it leaves the corner.  Must be
-        perpendicular to ``in_tangent`` (no straight-through corners).
-    handedness:
-        Whether the turn is clockwise (CW) or counter-clockwise (CCW)
-        as seen on screen (y grows downward).
+        perpendicular to ``in_tangent`` (no straight-through, no
+        180-degree turn).
     concentric:
         ``True`` when this corner is part of a concentric bundle - i.e.
         all lines in the bundle share the same arc centre and only
         differ in radius.  ``False`` for an isolated turn.
+    handedness:
+        Computed property: ``CW`` for ``R->D / D->L / L->U / U->R``
+        (the four screen-clockwise quarter turns), ``CCW`` for their
+        mirrors.  Derived from ``in_tangent`` / ``out_tangent`` so
+        hand-written descriptor tables can't drift from the geometry.
     """
 
     in_tangent: Direction
     out_tangent: Direction
-    handedness: CornerHandedness
     concentric: bool = True
+
+    def __post_init__(self) -> None:
+        pair = (self.in_tangent, self.out_tangent)
+        if pair not in _CW_TURNS and pair not in _CCW_TURNS:
+            raise ValueError(
+                f"Corner tangents {self.in_tangent.value}->"
+                f"{self.out_tangent.value} are not a right-angle turn "
+                f"(same axis or identical direction)"
+            )
+
+    @property
+    def handedness(self) -> CornerHandedness:
+        if (self.in_tangent, self.out_tangent) in _CW_TURNS:
+            return CornerHandedness.CW
+        return CornerHandedness.CCW
 
 
 @dataclass(frozen=True)
@@ -165,11 +139,9 @@ class TurnSequence:
         """``True`` iff the sequence has an odd number of handedness changes.
 
         A "change" is a pair of consecutive corners whose handedness
-        differs (CW->CCW or CCW->CW).  When parity is True, the
-        bundle's outer/inner ordering reverses between the route's
-        first and last corner - the same condition that
-        ``_propagate_wrap_flip_parity`` propagates as
-        ``Section.flip_lines``.
+        differs (CW->CCW or CCW->CW).  Recorded for descriptor-level
+        documentation; runtime wrap handlers preserve bundle ordering
+        via per-corner offset propagation regardless of this value.
 
         Examples
         --------
@@ -186,38 +158,48 @@ class TurnSequence:
 
 
 # ---------------------------------------------------------------------------
-# Wrap descriptor (table populated in a follow-up scaffolding commit)
+# Wrap descriptor
 # ---------------------------------------------------------------------------
+
+
+class RouteKind(Enum):
+    """Which handler in ``core.py`` produces a given corner sequence.
+
+    Names match the dispatch sites; one enum member per handler.
+    """
+
+    L_SHAPE = "l_shape"
+    TOP_ENTRY_L_SHAPE = "top_entry_l_shape"
+    LEFT_ENTRY_WRAP = "left_entry_wrap"
+    RIGHT_ENTRY_WRAP = "right_entry_wrap"
+    TB_BOTTOM_EXIT = "tb_bottom_exit"
+
+
+class ChannelKind(Enum):
+    """Coarse classification of a route's main vertical/horizontal channel.
+
+    * ``L_SHAPE`` - single vertical channel in the inter-column gap.
+    * ``WRAP``    - route exits then re-enters the same column or wraps
+      around the target section.
+    * ``BYPASS``  - route goes around an intervening section.
+    * ``TB_EXIT`` - vertical drop from a TB BOTTOM port.
+    * ``STRAIGHT``- degenerate same-X or same-Y route.
+    """
+
+    L_SHAPE = "L_SHAPE"
+    WRAP = "WRAP"
+    BYPASS = "BYPASS"
+    TB_EXIT = "TB_EXIT"
+    STRAIGHT = "STRAIGHT"
 
 
 @dataclass(frozen=True)
 class WrapDescriptor:
-    """Describes the corner sequence a routing handler produces.
+    """Describes the corner sequence a routing handler produces."""
 
-    Attributes
-    ----------
-    kind:
-        Short identifier naming which handler function in ``core.py``
-        produces this corner sequence (e.g. ``"l_shape"``,
-        ``"left_entry_wrap"``, ``"top_entry_l_shape"``).  Used for
-        cross-referencing the if-cascade.
-    turn_sequence:
-        The ordered list of corners the handler emits.  Its
-        :attr:`TurnSequence.parity` is what the section DAG
-        propagator must agree with.
-    channel_kind:
-        Coarse classification of the route's main vertical/horizontal
-        channel.  One of ``"L_SHAPE"`` (single vertical channel in
-        the inter-column gap), ``"WRAP"`` (route exits then re-enters
-        the same column or wraps around the target section),
-        ``"BYPASS"`` (route goes around an intervening section),
-        ``"TB_EXIT"`` (vertical drop from a TB BOTTOM port),
-        ``"STRAIGHT"`` (degenerate same-X or same-Y route).
-    """
-
-    kind: str
+    kind: RouteKind
     turn_sequence: TurnSequence
-    channel_kind: str
+    channel_kind: ChannelKind
 
     @property
     def parity(self) -> bool:
@@ -234,24 +216,22 @@ class WrapDescriptor:
 
 _L_RIGHT_DOWN_RIGHT = TurnSequence(
     corners=(
-        # exit right, then turn down
-        Corner(Direction.R, Direction.D, CornerHandedness.CW),
-        # arrive going down, then turn right into entry
-        Corner(Direction.D, Direction.R, CornerHandedness.CCW),
+        Corner(Direction.R, Direction.D),
+        Corner(Direction.D, Direction.R),
     )
 )
 
 _L_LEFT_DOWN_LEFT = TurnSequence(
     corners=(
-        Corner(Direction.L, Direction.D, CornerHandedness.CCW),
-        Corner(Direction.D, Direction.L, CornerHandedness.CW),
+        Corner(Direction.L, Direction.D),
+        Corner(Direction.D, Direction.L),
     )
 )
 
 _L_RIGHT_UP_RIGHT = TurnSequence(
     corners=(
-        Corner(Direction.R, Direction.U, CornerHandedness.CCW),
-        Corner(Direction.U, Direction.R, CornerHandedness.CW),
+        Corner(Direction.R, Direction.U),
+        Corner(Direction.U, Direction.R),
     )
 )
 
@@ -260,34 +240,34 @@ _L_RIGHT_UP_RIGHT = TurnSequence(
 # handedness change (parity = True).
 _LEFT_ENTRY_WRAP_DOWN = TurnSequence(
     corners=(
-        Corner(Direction.R, Direction.D, CornerHandedness.CW),
-        Corner(Direction.D, Direction.L, CornerHandedness.CW),
-        Corner(Direction.L, Direction.D, CornerHandedness.CCW),
-        Corner(Direction.D, Direction.R, CornerHandedness.CCW),
+        Corner(Direction.R, Direction.D),
+        Corner(Direction.D, Direction.L),
+        Corner(Direction.L, Direction.D),
+        Corner(Direction.D, Direction.R),
     )
 )
 
 # Right-entry wrap mirror.
 _RIGHT_ENTRY_WRAP_DOWN = TurnSequence(
     corners=(
-        Corner(Direction.L, Direction.D, CornerHandedness.CCW),
-        Corner(Direction.D, Direction.R, CornerHandedness.CCW),
-        Corner(Direction.R, Direction.D, CornerHandedness.CW),
-        Corner(Direction.D, Direction.L, CornerHandedness.CW),
+        Corner(Direction.L, Direction.D),
+        Corner(Direction.D, Direction.R),
+        Corner(Direction.R, Direction.D),
+        Corner(Direction.D, Direction.L),
     )
 )
 
 # TOP-entry L-shape variants.
 _TOP_ENTRY_L_DOWN_FROM_RIGHT = TurnSequence(
     corners=(
-        Corner(Direction.R, Direction.D, CornerHandedness.CW),
-        Corner(Direction.D, Direction.R, CornerHandedness.CCW),
+        Corner(Direction.R, Direction.D),
+        Corner(Direction.D, Direction.R),
     )
 )
 _TOP_ENTRY_L_DOWN_FROM_LEFT = TurnSequence(
     corners=(
-        Corner(Direction.L, Direction.D, CornerHandedness.CCW),
-        Corner(Direction.D, Direction.L, CornerHandedness.CW),
+        Corner(Direction.L, Direction.D),
+        Corner(Direction.D, Direction.L),
     )
 )
 
@@ -295,92 +275,81 @@ _TOP_ENTRY_L_DOWN_FROM_LEFT = TurnSequence(
 # ---------------------------------------------------------------------------
 # WRAP_TABLE: declarative mirror of _route_inter_section's if-cascade
 # ---------------------------------------------------------------------------
-# Key tuple: (exit_side, entry_side, drow_sign, dcol_sign).
-#
-# This table covers the **cross-row** cases the current dispatcher
-# fires.  Same-row L-shapes and the degenerate same-X TB BOTTOM->TOP
-# straight drop are deliberately omitted: their geometric corner
-# count disagrees with the propagator's row-based ``is_wrap`` flag.
-# Those mismatches are flagged in the module docstring as drift the
-# C1/C2 unification work needs to resolve before integration.
-#
-# Sources/sinks that are junctions without a clear port side use the
-# literal ``"JUNCTION"`` for ``exit_side``.  Entry sides are always
-# known (every inter-section edge terminates at a port).
-#
-# This table is forward-declared scaffolding; it is NOT called from
-# the dispatcher yet.  See module docstring for the integration plan.
-WRAP_TABLE: dict[tuple[str, str, int, int], WrapDescriptor] = {
+# Key tuple: (exit_side, entry_side, drow_sign, dcol_sign).  ``exit_side``
+# is ``None`` when the source is a junction without a port side; entry
+# sides are always known (every inter-section edge terminates at a port).
+WRAP_TABLE: dict[tuple[PortSide | None, PortSide, int, int], WrapDescriptor] = {
     # ------- Cross-row L-shapes (dispatcher fallback line 635) ----------
     # Descending L: source exits RIGHT (LR section), target entry on
-    # LEFT, one row down.  The standard right-down-right L is what the
-    # dispatcher's terminal ``return _route_l_shape(...)`` produces.
-    ("RIGHT", "LEFT", 1, 1): WrapDescriptor(
-        kind="l_shape",
+    # LEFT, one row down.
+    (PortSide.RIGHT, PortSide.LEFT, 1, 1): WrapDescriptor(
+        kind=RouteKind.L_SHAPE,
         turn_sequence=_L_RIGHT_DOWN_RIGHT,
-        channel_kind="L_SHAPE",
+        channel_kind=ChannelKind.L_SHAPE,
     ),
     # Ascending L (serpentine return).
-    ("RIGHT", "LEFT", -1, 1): WrapDescriptor(
-        kind="l_shape",
+    (PortSide.RIGHT, PortSide.LEFT, -1, 1): WrapDescriptor(
+        kind=RouteKind.L_SHAPE,
         turn_sequence=_L_RIGHT_UP_RIGHT,
-        channel_kind="L_SHAPE",
+        channel_kind=ChannelKind.L_SHAPE,
     ),
     # ------- TOP entry L-shape (dispatcher line 528-529) ----------------
     # TB section reached from an LR predecessor on the LEFT.
-    ("RIGHT", "TOP", 1, 1): WrapDescriptor(
-        kind="top_entry_l_shape",
+    (PortSide.RIGHT, PortSide.TOP, 1, 1): WrapDescriptor(
+        kind=RouteKind.TOP_ENTRY_L_SHAPE,
         turn_sequence=_TOP_ENTRY_L_DOWN_FROM_RIGHT,
-        channel_kind="L_SHAPE",
+        channel_kind=ChannelKind.L_SHAPE,
     ),
     # TB section reached from an RL predecessor on the RIGHT.
-    ("LEFT", "TOP", 1, -1): WrapDescriptor(
-        kind="top_entry_l_shape",
+    (PortSide.LEFT, PortSide.TOP, 1, -1): WrapDescriptor(
+        kind=RouteKind.TOP_ENTRY_L_SHAPE,
         turn_sequence=_TOP_ENTRY_L_DOWN_FROM_LEFT,
-        channel_kind="L_SHAPE",
+        channel_kind=ChannelKind.L_SHAPE,
     ),
     # ------- LEFT-entry cross-row wrap (dispatcher line 608-617) --------
     # Source row above, target row below, entry on LEFT, source column
     # to the RIGHT of the target column (dx < 0).  Four-corner zigzag.
-    ("RIGHT", "LEFT", 1, -1): WrapDescriptor(
-        kind="left_entry_wrap",
+    (PortSide.RIGHT, PortSide.LEFT, 1, -1): WrapDescriptor(
+        kind=RouteKind.LEFT_ENTRY_WRAP,
         turn_sequence=_LEFT_ENTRY_WRAP_DOWN,
-        channel_kind="WRAP",
+        channel_kind=ChannelKind.WRAP,
     ),
     # Junction source (exit-chain wraps around): same shape.
-    ("JUNCTION", "LEFT", 1, -1): WrapDescriptor(
-        kind="left_entry_wrap",
+    (None, PortSide.LEFT, 1, -1): WrapDescriptor(
+        kind=RouteKind.LEFT_ENTRY_WRAP,
         turn_sequence=_LEFT_ENTRY_WRAP_DOWN,
-        channel_kind="WRAP",
+        channel_kind=ChannelKind.WRAP,
     ),
     # ------- RIGHT-entry cross-row wrap (dispatcher line 598-599) -------
     # Source to the LEFT of the target column, entry on RIGHT.  Wraps
     # over the top of the target section and drops in from the right.
-    ("LEFT", "RIGHT", 1, 1): WrapDescriptor(
-        kind="right_entry_wrap",
+    (PortSide.LEFT, PortSide.RIGHT, 1, 1): WrapDescriptor(
+        kind=RouteKind.RIGHT_ENTRY_WRAP,
         turn_sequence=_RIGHT_ENTRY_WRAP_DOWN,
-        channel_kind="WRAP",
+        channel_kind=ChannelKind.WRAP,
     ),
     # ------- TB BOTTOM exit to side-entry (dispatcher line 521-522) -----
     # TB section exits via BOTTOM, target entry on LEFT side.  Vertical
     # drop with X offsets terminating in an L-shape into the side port.
-    ("BOTTOM", "LEFT", 1, 1): WrapDescriptor(
-        kind="tb_bottom_exit",
+    (PortSide.BOTTOM, PortSide.LEFT, 1, 1): WrapDescriptor(
+        kind=RouteKind.TB_BOTTOM_EXIT,
         turn_sequence=_L_RIGHT_DOWN_RIGHT,
-        channel_kind="TB_EXIT",
+        channel_kind=ChannelKind.TB_EXIT,
     ),
-    ("BOTTOM", "LEFT", 1, -1): WrapDescriptor(
-        kind="tb_bottom_exit",
+    (PortSide.BOTTOM, PortSide.LEFT, 1, -1): WrapDescriptor(
+        kind=RouteKind.TB_BOTTOM_EXIT,
         turn_sequence=_L_LEFT_DOWN_LEFT,
-        channel_kind="TB_EXIT",
+        channel_kind=ChannelKind.TB_EXIT,
     ),
 }
 
 
 __all__ = [
+    "ChannelKind",
     "Corner",
     "CornerHandedness",
+    "RouteKind",
     "TurnSequence",
-    "WrapDescriptor",
     "WRAP_TABLE",
+    "WrapDescriptor",
 ]

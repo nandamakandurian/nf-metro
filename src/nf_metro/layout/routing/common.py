@@ -18,18 +18,28 @@ from nf_metro.parser.model import Edge, MetroGraph, Section, Station
 
 
 class Direction(Enum):
-    """Cardinal travel direction for a horizontal or vertical run.
-
-    Used by the inter-section descriptor scaffolding (see
-    ``inter_section.py``) to characterise corner in/out tangents in a
-    direction-agnostic way.  Not yet wired into runtime routing; the
-    routing code still operates on raw signed deltas.
-    """
+    """Cardinal travel direction for a horizontal or vertical run."""
 
     R = "R"  # east, +x
     L = "L"  # west, -x
     U = "U"  # north, -y
     D = "D"  # south, +y
+
+    @property
+    def sign(self) -> float:
+        """``+1.0`` for R / D (positive axis), ``-1.0`` for L / U."""
+        return 1.0 if self in (Direction.R, Direction.D) else -1.0
+
+
+def horizontal_direction(dx: float) -> Direction:
+    """``Direction.R`` if ``dx > 0`` else ``Direction.L`` (ties resolve to L)."""
+    return Direction.R if dx > 0 else Direction.L
+
+
+def vertical_direction(dy: float) -> Direction:
+    """``Direction.D`` if ``dy > 0`` else ``Direction.U`` (ties resolve to U)."""
+    return Direction.D if dy > 0 else Direction.U
+
 
 # ---------------------------------------------------------------------------
 # Grid-position helpers
@@ -247,28 +257,8 @@ def inter_column_channel_x(
     tgt_sec = graph.sections.get(tgt.section_id) if tgt.section_id else None
 
     if src_sec and tgt_sec and src_sec.grid_col != tgt_sec.grid_col:
-        # Find the rightmost/leftmost edges of the source and target
-        # columns (accounting for sibling sections that may be wider).
-        src_col = src_sec.grid_col
-        tgt_col = tgt_sec.grid_col
+        return column_gap_midpoint(graph, src_sec.grid_col, tgt_sec.grid_col)
 
-        if dx > 0:
-            right = col_right_edge(graph, src_col, default=sx)
-            left = col_left_edge(graph, tgt_col, default=tx)
-            return (right + left) / 2
-        else:
-            left = col_left_edge(graph, src_col, default=sx)
-            right = col_right_edge(graph, tgt_col, default=tx)
-            return (left + right) / 2
-
-
-    # Junction at L-shape elbow (src is a junction with no section_id):
-    # When the junction is at the corner of a clockwise/counter-clockwise
-    # L, the channel should sit at the junction's x so the L pivots
-    # cleanly through the junction.  Apply only for genuine L-shapes
-    # (significant dy AND dx) to avoid disturbing degenerate near-vertical
-    # or near-horizontal routes that the old fallback handled correctly.
-    # See docs/dev/authoring_misfires.md #2 / #10.
     # Fallback: place near source
     if dx > 0:
         return sx + max_r + offset_step
@@ -400,21 +390,6 @@ def bypass_bottom_y(
                     else:
                         candidate = (row_bottom + header_top) / 2
 
-    # Final safety: the iterative inter-row clamping above can land the
-    # candidate INSIDE a different-row section when no real gap exists
-    # (e.g. a wide colspan section blocks every column in the bypass's
-    # span).  Detect that and fall back to routing BELOW every section
-    # in the column range - the only universally-safe alternative when
-    # there is no inter-row gap to slot into.
-    blocking = [
-        s
-        for s in graph.sections.values()
-        if s.bbox_w > 0 and lo <= s.grid_col <= hi
-        and s.bbox_y - SECTION_HEADER_PROTRUSION <= candidate <= s.bbox_y + s.bbox_h
-    ]
-    if blocking:
-        return max(s.bbox_y + s.bbox_h for s in blocking) + clearance
-
     return candidate
 
 
@@ -485,14 +460,9 @@ def inter_row_channel_y(
     """Compute Y for a horizontal channel in an inter-row gap.
 
     Vertical equivalent of ``inter_column_channel_x``: places the
-    channel in the inter-row gap, above the target section's header
-    (number badge + label rendered above bbox_y).
+    channel in the inter-row gap, clear of section headers (numbered
+    circle + label rendered above/below bbox_y).
     """
-    # Keep the channel clear of section headers (numbered circle + label)
-    # that protrude above/below bbox_y.
-
-    # Resolve sections for junction stations (section_id is None for
-    # junctions; trace through edges to find a connected port's section).
     src_sec = resolve_section(graph, src)
     tgt_sec = resolve_section(graph, tgt)
 

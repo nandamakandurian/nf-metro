@@ -12,77 +12,37 @@ clustering fails: per-line offsets put each line's corners at
 slightly different xy, so tight tolerance misses real bugs while
 loose tolerance flags every concentric corner.
 
-Wired into :func:`compute_layout(graph, validate=True)` via
-``_guard_bundle_order_preserved`` in ``engine.py``.
+Returns a list of :class:`BundleOrderViolation`; the caller decides
+whether to log, raise, or ignore.  Tests in
+``tests/test_bundle_order_invariant.py`` exercise it against every
+gallery example and topology fixture.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from enum import Enum
 
 from nf_metro.layout.constants import COORD_TOLERANCE_FINE
-from nf_metro.layout.routing.common import Direction, RoutedPath
+from nf_metro.layout.routing.common import (
+    Direction,
+    RoutedPath,
+    horizontal_direction,
+    vertical_direction,
+)
 
 # Segments shorter than this are sub-pixel artefacts of per-line
 # offsets and carry no meaningful direction of travel.
 _MIN_SEGMENT_LENGTH = 1.0
 
 
-class Side:
-    """Sentinel-string namespace: ``LEFT`` / ``RIGHT`` / ``COINCIDENT``."""
+class Side(Enum):
+    """Side of a line relative to its bundle mate's trajectory."""
 
     LEFT = "LEFT"
     RIGHT = "RIGHT"
     COINCIDENT = "COINCIDENT"
-
-
-def _segment_direction(
-    p1: tuple[float, float], p2: tuple[float, float]
-) -> Direction | None:
-    """Cardinal direction (STRICT off-axis tolerance); helper for unit tests."""
-    dx = p2[0] - p1[0]
-    dy = p2[1] - p1[1]
-    horizontal = abs(dx) > abs(dy) and abs(dy) <= COORD_TOLERANCE_FINE
-    vertical = abs(dy) > abs(dx) and abs(dx) <= COORD_TOLERANCE_FINE
-    if horizontal:
-        return Direction.R if dx > 0 else Direction.L
-    if vertical:
-        return Direction.D if dy > 0 else Direction.U
-    return None
-
-
-def _left_of(tangent: Direction) -> Direction:
-    """Cardinal direction 90 deg CCW from *tangent* (screen coords)."""
-    return {
-        Direction.R: Direction.U,
-        Direction.U: Direction.L,
-        Direction.L: Direction.D,
-        Direction.D: Direction.R,
-    }[tangent]
-
-
-def _relative_side(
-    a_xy: tuple[float, float],
-    b_xy: tuple[float, float],
-    side_direction: Direction,
-) -> str:
-    """LEFT iff ``(a - b) . side_direction > 0``, else RIGHT / COINCIDENT."""
-    ax, ay = a_xy
-    bx, by = b_xy
-    if side_direction is Direction.U:
-        delta = by - ay
-    elif side_direction is Direction.D:
-        delta = ay - by
-    elif side_direction is Direction.R:
-        delta = ax - bx
-    elif side_direction is Direction.L:
-        delta = bx - ax
-    else:  # pragma: no cover - exhausted by Direction
-        return Side.COINCIDENT
-    if abs(delta) <= COORD_TOLERANCE_FINE:
-        return Side.COINCIDENT
-    return Side.LEFT if delta > 0 else Side.RIGHT
 
 
 @dataclass(frozen=True)
@@ -101,8 +61,8 @@ class BundleOrderViolation:
     corner_xy: tuple[float, float]
     in_tangent: Direction
     out_tangent: Direction
-    before: str
-    after: str
+    before: Side
+    after: Side
     segment_index: int = -1
 
     def message(self) -> str:
@@ -113,9 +73,9 @@ class BundleOrderViolation:
             f"corner ({cx:.1f},{cy:.1f}) "
             f"in={self.in_tangent.value} out={self.out_tangent.value} "
             f"segment={self.segment_index}: "
-            f"expected line {self.line_a!r} on {self.before} of "
+            f"expected line {self.line_a!r} on {self.before.value} of "
             f"line {self.line_b!r} (matching incoming run); "
-            f"observed {self.line_a!r} on {self.after} of "
+            f"observed {self.line_a!r} on {self.after.value} of "
             f"line {self.line_b!r} on outgoing run"
         )
 
@@ -155,8 +115,8 @@ def _segment_cardinal(
     if abs(dx) < _MIN_SEGMENT_LENGTH and abs(dy) < _MIN_SEGMENT_LENGTH:
         return None
     if abs(dx) >= abs(dy):
-        return Direction.R if dx > 0 else Direction.L
-    return Direction.D if dy > 0 else Direction.U
+        return horizontal_direction(dx)
+    return vertical_direction(dy)
 
 
 def check_bundle_order_preserved(
@@ -224,14 +184,19 @@ def _check_pair(
             continue
         cur_dir = _segment_cardinal(mid_p1, mid_p2)
         if last_sign != 0 and sign != last_sign:
+            # ``last_dir`` and ``cur_dir`` are non-None whenever we reach
+            # here: both were set on iterations that already passed the
+            # ``perp is None`` / ``sign == 0`` gates, which require the
+            # same >= 1px segment length ``_segment_cardinal`` does.
+            assert last_dir is not None and cur_dir is not None
             return BundleOrderViolation(
                 edge_source=src_id,
                 edge_target=tgt_id,
                 line_a=a_route.line_id,
                 line_b=b_route.line_id,
                 corner_xy=a_p1,
-                in_tangent=last_dir if last_dir is not None else Direction.R,
-                out_tangent=cur_dir if cur_dir is not None else Direction.R,
+                in_tangent=last_dir,
+                out_tangent=cur_dir,
                 before=Side.LEFT if last_sign > 0 else Side.RIGHT,
                 after=Side.LEFT if sign > 0 else Side.RIGHT,
                 segment_index=k,

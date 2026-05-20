@@ -1142,6 +1142,18 @@ def _route_l_shape(
         mid_x = inter_column_channel_x(
             ctx.graph, src, tgt, sx, tx, dx, max_r, ctx.offset_step
         )
+        # Junction sources have no section_id, so inter_column_channel_x
+        # falls to near-source placement (sx + max_r + step) and the V
+        # channel inherits the JUNCTION_MARGIN offset.  Re-resolve via
+        # the junction's upstream section so junction-rooted L-shapes
+        # also adopt the column-gap midpoint.
+        if src.section_id is None:
+            src_sec = resolve_section(ctx.graph, src, prefer_upstream=True)
+            tgt_sec = resolve_section(ctx.graph, tgt, prefer_upstream=False)
+            if src_sec and tgt_sec and src_sec.grid_col != tgt_sec.grid_col:
+                mid_x = column_gap_midpoint(
+                    ctx.graph, src_sec.grid_col, tgt_sec.grid_col
+                )
 
     vx = mid_x + delta
 
@@ -1201,6 +1213,22 @@ def _route_l_shape(
             is_inter_section=True,
             curve_radii=[r_lead, r_second],
             offsets_applied=True,
+        )
+
+    # If the V channel ended up behind the source (typical for
+    # junction sources whose JUNCTION_MARGIN places them past the
+    # gap midpoint), extend pts[0] back by curve_radius so the first
+    # segment is forward-going and the corner gets a full-radius arc.
+    # The upstream port->junction route's trim pass shortens its
+    # tail to match pts[0], preserving visual continuity.
+    h_sign = horizontal.sign
+    if (vx - sx) * h_sign < ctx.curve_radius:
+        return RoutedPath(
+            edge=edge,
+            line_id=edge.line_id,
+            points=[(vx - h_sign * ctx.curve_radius, sy), (vx, sy), (vx, ty), (tx, ty)],
+            is_inter_section=True,
+            curve_radii=[ctx.curve_radius, r_second],
         )
 
     return RoutedPath(
@@ -1304,7 +1332,7 @@ def _route_left_entry_wrap(
     sx, sy = src.x, src.y
     tx, ty = tgt.x, tgt.y
     dy = ty - sy
-    going_down = dy > 0
+    vertical = vertical_direction(dy)
 
     # When the junction has mixed-direction siblings, share the first-
     # corner geometry with the other handlers (bypass / L-shape) by
@@ -1320,7 +1348,7 @@ def _route_left_entry_wrap(
         fan_delta, r_first, _ = l_shape_radii(
             ui,
             un,
-            going_down=going_down,
+            vertical=vertical,
             offset_step=ctx.offset_step,
             base_radius=ctx.curve_radius,
         )
@@ -1337,7 +1365,7 @@ def _route_left_entry_wrap(
         _, _, r_second = l_shape_radii(
             i,
             n,
-            going_down=going_down,
+            vertical=vertical,
             offset_step=ctx.offset_step,
             base_radius=ctx.curve_radius,
         )
@@ -1346,7 +1374,7 @@ def _route_left_entry_wrap(
         delta, r_first, r_second = l_shape_radii(
             i,
             n,
-            going_down=going_down,
+            vertical=vertical,
             offset_step=ctx.offset_step,
             base_radius=ctx.curve_radius,
         )
@@ -1533,7 +1561,7 @@ def _route_around_section_below(
     """
     sx, sy = src.x, src.y
     ex, ey = entry_port.x, entry_port.y
-    going_down = ey > sy
+    vertical = vertical_direction(ey - sy)
 
     # Match the geometry of _route_left_entry_wrap's first corner so
     # this handler composes cleanly with sibling routes from the same
@@ -1547,7 +1575,7 @@ def _route_around_section_below(
         fan_delta, _r_first, _ = l_shape_radii(
             ui,
             un,
-            going_down=going_down,
+            vertical=vertical,
             offset_step=ctx.offset_step,
             base_radius=ctx.curve_radius,
         )
@@ -1559,7 +1587,7 @@ def _route_around_section_below(
         delta, _r_first, _r_second = l_shape_radii(
             i,
             n,
-            going_down=going_down,
+            vertical=vertical,
             offset_step=ctx.offset_step,
             base_radius=ctx.curve_radius,
         )

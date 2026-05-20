@@ -969,6 +969,7 @@ def _route_bypass(
     )
 
     # Gap channel centers and per-line positions.
+    base_bypass_offset = ctx.curve_radius + ctx.offset_step
     half_g2 = (g2_n - 1) * ctx.offset_step / 2
 
     if horizontal is Direction.R:
@@ -995,13 +996,14 @@ def _route_bypass(
             gap1_mid = column_gap_midpoint(graph, src_col, src_col + 1)
             gap1_x = gap1_mid + delta1
 
-        # Centre the gap2 bundle on the target-side column gap midpoint,
-        # mirroring gap1.  Clamp the outer line of the bundle to stay at
-        # least curve_radius from the target so the final corner fits.
-        gap2_mid = column_gap_midpoint(graph, tgt_col - 1, tgt_col)
+        gap2_base = (
+            column_gap_midpoint(graph, tgt_col - 1, tgt_col) + base_bypass_offset
+        )
         gap2_limit = effective_tx - ctx.curve_radius
-        if gap2_mid + half_g2 > gap2_limit:
+        if gap2_base + (g2_n - 1) * ctx.offset_step > gap2_limit:
             gap2_mid = gap2_limit - half_g2
+        else:
+            gap2_mid = gap2_base + half_g2
         if trunk_v_up_pull_away:
             # Place this bundle CLOSER to the previous column (away from
             # the target's edge) so it doesn't overlap with a sibling
@@ -1051,13 +1053,14 @@ def _route_bypass(
             gap1_mid = column_gap_midpoint(graph, src_col - 1, src_col)
             gap1_x = gap1_mid + delta1
 
-        # Centre the gap2 bundle on the target-side column gap midpoint,
-        # mirroring gap1.  Clamp the outer line of the bundle to stay at
-        # least curve_radius from the target so the final corner fits.
-        gap2_mid = column_gap_midpoint(graph, tgt_col, tgt_col + 1)
+        gap2_base = (
+            column_gap_midpoint(graph, tgt_col, tgt_col + 1) - base_bypass_offset
+        )
         gap2_limit = effective_tx + ctx.curve_radius
-        if gap2_mid - half_g2 < gap2_limit:
+        if gap2_base - (g2_n - 1) * ctx.offset_step < gap2_limit:
             gap2_mid = gap2_limit + half_g2
+        else:
+            gap2_mid = gap2_base - half_g2
         gap2_x = gap2_mid + delta2
 
     # Apply per-line offsets directly so the renderer doesn't have to

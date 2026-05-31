@@ -164,6 +164,10 @@ spread the parallel tracks with `%%metro line_offset: <px>` (see directive table
 - `%%metro compact_offsets: true` — compact per-station offsets; good for dense
   maps with few lines.
 - `%%metro line_order: span` — give longest-spanning lines the inner tracks.
+- `%%metro note: <station_id> | <text>` — attach a smaller detail line below a
+  station (the table / topic / config key / queue / state it touches), so the node
+  label stays readable while the precise detail rides underneath. Use `\n` for
+  multiple small lines.
 - Line style 4th field — `dashed` / `dotted` to mark exceptional routes
   (unconfirmed, fallback, side-paths) so the eye separates them from the happy path.
 
@@ -423,6 +427,7 @@ These are automatically rewritten into port-to-port connections with junction st
 | `%%metro dir: <station> \| <label>` | Global | Mark a station with a folder icon (e.g. output directory) |
 | `%%metro compact_offsets: true` | Global | Use compact per-station offsets instead of global line-priority slots (better for dense maps with few lines) |
 | `%%metro line_offset: <px>` | Global | Per-line track separation for parallel bundles & forks (overrides the `OFFSET_STEP` default). Larger values de-squish dense maps. _(DurianPay fork addition.)_ |
+| `%%metro note: <station_id> \| <text>` | Global | Secondary annotation rendered as **smaller muted text below the station label** (use `\n` for multiple small lines). Keeps a readable label on the node and the precise detail (table, topic, config key, queue, state) just beneath it. _(DurianPay fork addition.)_ |
 | `%%metro legend_min_height: <pixels>` | Global | Minimum legend content height in pixels (useful for single-line maps where the logo would otherwise be tiny) |
 | `%%metro entry: <side> \| <lines>` | Section | Entry port hint |
 | `%%metro exit: <side> \| <lines>` | Section | Exit port hint |

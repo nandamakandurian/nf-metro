@@ -10,8 +10,22 @@ from pathlib import Path
 
 import drawsvg as draw
 
-from nf_metro.layout.constants import LABEL_LINE_HEIGHT
-from nf_metro.layout.labels import LabelPlacement, place_labels
+from nf_metro.layout.constants import (
+    CARD_DIVIDER_HEIGHT,
+    CARD_FONT_SCALE,
+    CARD_HEADER_SCALE,
+    CARD_LEFT_PAD,
+    CARD_SUBHEADER_SCALE,
+    CARD_TOP_PAD,
+    LABEL_LINE_HEIGHT,
+)
+from nf_metro.layout.labels import (
+    LabelPlacement,
+    _card_line_text,
+    card_block_height,
+    place_labels,
+)
+from nf_metro.layout.constants import CARD_BOTTOM_PAD
 from nf_metro.layout.routing import RoutedPath, compute_station_offsets, route_edges
 from nf_metro.layout.routing.corners import resolve_curve_radii
 from nf_metro.parser.model import (
@@ -305,6 +319,12 @@ def render_svg(
         legend_position if legend_position is not None else graph.legend_position
     )
 
+    # Grow card-bearing sections upward to fit the card block above the
+    # pass-through station. Done here (post-layout) so later layout stages
+    # can't undo it; only bbox top + TOP ports move, so horizontal routing
+    # through the station is unaffected.
+    _grow_card_sections(graph, theme.label_font_size)
+
     station_offsets = compute_station_offsets(graph)
     routes = route_edges(graph, station_offsets=station_offsets)
 
@@ -423,6 +443,7 @@ def render_svg(
     _render_stations(d, graph, theme, station_offsets)
 
     # Draw labels
+    _render_cards(d, graph, theme)
     _render_labels(d, labels, theme)
 
     # Debug overlay (ports, hidden stations, edge waypoints)
@@ -1033,6 +1054,143 @@ def _render_terminus_icons(
                     dominant_baseline="hanging",
                 )
             )
+
+
+def _grow_card_sections(graph: MetroGraph, base_font: float) -> None:
+    """Grow each card-bearing section's box upward to fit its card above the
+    pass-through station. Post-layout, so later stages can't undo it."""
+    from nf_metro.parser.model import PortSide
+
+    for section in graph.sections.values():
+        if not section.card or section.bbox_w <= 0:
+            continue
+        on_track = [
+            s
+            for s in graph.stations.values()
+            if s.section_id == section.id
+            and not s.is_port
+            and not s.is_hidden
+            and not s.off_track
+        ]
+        if not on_track:
+            continue
+        anchor_y = min(s.y for s in on_track)
+        needed_top = anchor_y - card_block_height(section.card, base_font) - CARD_TOP_PAD
+        if needed_top < section.bbox_y:
+            section.bbox_h += section.bbox_y - needed_top
+            section.bbox_y = needed_top
+            for pid in section.entry_ports + section.exit_ports:
+                ps = graph.stations.get(pid)
+                port = graph.ports.get(pid)
+                if ps and port and getattr(port, "side", None) == PortSide.TOP:
+                    ps.y = section.bbox_y
+                    port.y = ps.y
+
+    # If growth pushed any box above the top margin (where section titles sit),
+    # shift the whole graph down to keep title clearance.
+    sections_with_box = [s for s in graph.sections.values() if s.bbox_w > 0]
+    if not sections_with_box:
+        return
+    top_clearance = 50.0
+    min_top = min(s.bbox_y for s in sections_with_box)
+    if min_top < top_clearance:
+        shift = top_clearance - min_top
+        for st in graph.stations.values():
+            st.y += shift
+        for port in graph.ports.values():
+            port.y += shift
+        for s in graph.sections.values():
+            s.bbox_y += shift
+
+
+def _render_cards(
+    d: draw.Drawing,
+    graph: MetroGraph,
+    theme: Theme,
+) -> None:
+    """Render section description cards (rich-text blocks inside section boxes).
+
+    Per-line markdown: ``# header``, ``## subheader``, ``---`` divider,
+    whole-line ``**bold**`` / ``*italic*`` / ``__underline__``, optional leading
+    ``|c`` / ``|r`` alignment (default left). The metro line passes straight
+    through the section's single pass-through station below the card.
+    """
+    base = theme.label_font_size
+    for section in graph.sections.values():
+        if not section.card or section.bbox_w <= 0:
+            continue
+        # Anchor the card so it sits entirely ABOVE the section's pass-through
+        # station (the on-track node the metro line runs through), rather than
+        # straddling the line.
+        on_track = [
+            s
+            for s in graph.stations.values()
+            if s.section_id == section.id
+            and not s.is_port
+            and not s.is_hidden
+            and not s.off_track
+        ]
+        block_h = card_block_height(section.card, base)
+        content_h = block_h - CARD_TOP_PAD - CARD_BOTTOM_PAD
+        if on_track:
+            anchor_y = min(s.y for s in on_track)
+            y = anchor_y - CARD_BOTTOM_PAD - content_h
+        else:
+            y = section.bbox_y + CARD_TOP_PAD
+        if y < section.bbox_y + CARD_TOP_PAD:
+            y = section.bbox_y + CARD_TOP_PAD
+        for raw in section.card:
+            align, s = _card_line_text(raw)
+            if s == "---":
+                y += CARD_DIVIDER_HEIGHT * 0.5
+                d.append(
+                    draw.Line(
+                        section.bbox_x + CARD_LEFT_PAD,
+                        y,
+                        section.bbox_x + section.bbox_w - CARD_LEFT_PAD,
+                        y,
+                        stroke=theme.label_color,
+                        stroke_width=1,
+                        stroke_opacity=0.3,
+                    )
+                )
+                y += CARD_DIVIDER_HEIGHT * 0.5
+                continue
+            weight = theme.label_font_weight
+            extra: dict[str, str] = {}
+            font = base * CARD_FONT_SCALE
+            if s.startswith("# "):
+                s, font, weight = s[2:], base * CARD_HEADER_SCALE, "bold"
+            elif s.startswith("## "):
+                s, font, weight = s[3:], base * CARD_SUBHEADER_SCALE, "bold"
+            elif s.startswith("**") and s.endswith("**") and len(s) >= 4:
+                s, weight = s[2:-2], "bold"
+            elif s.startswith("*") and s.endswith("*") and len(s) >= 2:
+                s, extra["font_style"] = s[1:-1], "italic"
+            elif s.startswith("__") and s.endswith("__") and len(s) >= 4:
+                s, extra["text_decoration"] = s[2:-2], "underline"
+            s = s.replace("**", "").replace("__", "")
+            if align == "center":
+                x, anchor = section.bbox_x + section.bbox_w / 2, "middle"
+            elif align == "right":
+                x, anchor = section.bbox_x + section.bbox_w - CARD_LEFT_PAD, "end"
+            else:
+                x, anchor = section.bbox_x + CARD_LEFT_PAD, "start"
+            d.append(
+                draw.Text(
+                    s,
+                    font,
+                    x,
+                    y,
+                    fill=theme.label_color,
+                    font_family=theme.label_font_family,
+                    font_weight=weight,
+                    text_anchor=anchor,
+                    dominant_baseline="hanging",
+                    **extra,
+                )
+            )
+            y += font * LABEL_LINE_HEIGHT
 
 
 def _render_labels(

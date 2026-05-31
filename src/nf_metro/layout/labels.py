@@ -12,6 +12,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from nf_metro.layout.constants import (
+    CARD_BOTTOM_PAD,
+    CARD_DIVIDER_HEIGHT,
+    CARD_FONT_SCALE,
+    CARD_HEADER_SCALE,
+    CARD_SUBHEADER_SCALE,
+    CARD_TOP_PAD,
     CHAR_WIDTH,
     COLLISION_MULTIPLIER,
     DESCENDER_CLEARANCE,
@@ -1031,3 +1037,52 @@ def _has_collision(
         if _boxes_overlap(cbox, _label_bbox(placed)):
             return True
     return False
+
+
+def _card_line_text(raw: str) -> tuple[str, str]:
+    """Return (align, stripped) for a card line; align in {left,center,right}."""
+    s = raw.strip()
+    align = "left"
+    if s[:3] == "|c ":
+        align, s = "center", s[3:].strip()
+    elif s[:3] == "|r ":
+        align, s = "right", s[3:].strip()
+    return align, s
+
+
+def card_block_height(card_lines: list[str], base_font: float = FONT_HEIGHT) -> float:
+    """Total vertical pixels a section card block occupies (for box growth)."""
+    if not card_lines:
+        return 0.0
+    total = CARD_TOP_PAD + CARD_BOTTOM_PAD
+    for raw in card_lines:
+        _, s = _card_line_text(raw)
+        if s == "---":
+            total += CARD_DIVIDER_HEIGHT
+        elif s.startswith("# "):
+            total += base_font * CARD_HEADER_SCALE * LABEL_LINE_HEIGHT
+        elif s.startswith("## "):
+            total += base_font * CARD_SUBHEADER_SCALE * LABEL_LINE_HEIGHT
+        else:
+            total += base_font * CARD_FONT_SCALE * LABEL_LINE_HEIGHT
+    return total
+
+
+def card_block_width(card_lines: list[str], base_font: float = FONT_HEIGHT) -> float:
+    """Pixel width of the widest card line (markers stripped), for box sizing."""
+    if not card_lines:
+        return 0.0
+    char_w = CHAR_WIDTH * (base_font / FONT_HEIGHT)
+    widest = 0.0
+    for raw in card_lines:
+        _, s = _card_line_text(raw)
+        scale = CARD_FONT_SCALE
+        if s.startswith("# "):
+            s, scale = s[2:], CARD_HEADER_SCALE
+        elif s.startswith("## "):
+            s, scale = s[3:], CARD_SUBHEADER_SCALE
+        elif s == "---":
+            continue
+        s = s.replace("**", "").replace("__", "").replace("*", "")
+        widest = max(widest, len(s) * char_w * scale)
+    return widest

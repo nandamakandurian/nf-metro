@@ -46,6 +46,22 @@ Y_OFFSET: float = 120.0
 ROW_GAP: float = 120.0
 """Vertical gap between fold rows."""
 
+# --- Section description card (%%metro card:) ---
+CARD_FONT_SCALE: float = 0.82
+"""Card body line font size as a fraction of the base label font."""
+CARD_HEADER_SCALE: float = 1.15
+"""Card `# header` line font size as a fraction of the base label font."""
+CARD_SUBHEADER_SCALE: float = 1.0
+"""Card `## subheader` line font size as a fraction of the base label font."""
+CARD_DIVIDER_HEIGHT: float = 12.0
+"""Vertical space a `---` divider line consumes."""
+CARD_TOP_PAD: float = 16.0
+"""Padding from the section box top to the first card line."""
+CARD_BOTTOM_PAD: float = 12.0
+"""Padding below the last card line before the track."""
+CARD_LEFT_PAD: float = 18.0
+"""Left inset of card text from the section box left edge."""
+
 # ---------------------------------------------------------------------------
 # Section sizing / padding (engine defaults)
 # ---------------------------------------------------------------------------

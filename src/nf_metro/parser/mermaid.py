@@ -181,6 +181,12 @@ def parse_metro_mermaid(text: str, max_station_columns: int = 15) -> MetroGraph:
         if station:
             station.note = note
 
+    # Apply pending section cards (rich-text description blocks)
+    for section_id, lines in graph._pending_cards.items():
+        section = graph.sections.get(section_id)
+        if section:
+            section.card = lines
+
     return graph
 
 
@@ -270,6 +276,14 @@ def _parse_directive(
             sid = sid.strip()
             if sid:
                 graph._pending_notes[sid] = text.strip().replace("\\n", "\n")
+    elif content.startswith("card:"):
+        # card: <section_id> | <markdown-ish line>  (repeatable; lines stack)
+        rest = content[len("card:") :].strip()
+        if "|" in rest:
+            sid, line = rest.split("|", 1)
+            sid = sid.strip()
+            if sid:
+                graph._pending_cards.setdefault(sid, []).append(line.strip())
     elif ":" in content and content.split(":", 1)[0] in VALID_ICON_TYPES:
         icon_type, rest = content.split(":", 1)
         parts = rest.strip().split("|")

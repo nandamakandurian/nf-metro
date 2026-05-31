@@ -138,6 +138,12 @@ class Section:
     # Hints from %%metro entry/exit directives: list of (side, [line_ids])
     exit_hints: list[tuple[PortSide, list[str]]] = field(default_factory=list)
     entry_hints: list[tuple[PortSide, list[str]]] = field(default_factory=list)
+    # Rich-text description card rendered inside the section box (above the
+    # track). Each entry is one markdown-ish line: `# header`, `## subheader`,
+    # `---` divider, `**bold**`, `*italic*`, `__underline__`, optional leading
+    # `|c`/`|r` alignment. Set via `%%metro card:`. Lets a writer describe the
+    # stage's internal sub-steps as formatted text instead of fake stations.
+    card: list[str] = field(default_factory=list)
     # Internal flow direction ("LR" = left-to-right, "TB" = top-to-bottom)
     direction: str = "LR"
     # Bounding box (set by layout engine)
@@ -207,6 +213,8 @@ class MetroGraph:
     _pending_off_track: list[str] = field(default_factory=list)
     # Pending station notes: station_id -> secondary annotation text
     _pending_notes: dict[str, str] = field(default_factory=dict)
+    # Pending section cards: section_id -> list of markdown-ish lines
+    _pending_cards: dict[str, list[str]] = field(default_factory=dict)
     # Lazy caches keyed off the edge list; invalidated on edge mutation.
     _station_lines_cache: dict[str, list[str]] | None = field(default=None, repr=False)
     _edges_from_cache: dict[str, list[Edge]] | None = field(default=None, repr=False)

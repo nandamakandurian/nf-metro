@@ -4737,6 +4737,18 @@ def _layout_single_section(
     y_max = max(ys)
     section.bbox_x = min(xs) - section_x_padding
     section.bbox_w = (max(xs) - min(xs)) + section_x_padding * 2
+    # A description card may be wider than the station extent; widen the box
+    # (symmetrically, before placement) so the card fits and columns space
+    # correctly. Routing/ports/junctions are computed downstream from this.
+    if section.card:
+        from nf_metro.layout.constants import CARD_LEFT_PAD
+        from nf_metro.layout.labels import card_block_width
+
+        card_w = card_block_width(section.card) + 2 * CARD_LEFT_PAD
+        if card_w > section.bbox_w:
+            center = section.bbox_x + section.bbox_w / 2
+            section.bbox_w = card_w
+            section.bbox_x = center - card_w / 2
     bbox_top = y_min - y_pad
     bbox_bot = y_max + y_pad
     if bypass_v_ys:

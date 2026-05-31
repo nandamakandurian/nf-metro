@@ -1130,6 +1130,8 @@ def compute_station_offsets(
 
     Returns dict mapping (station_id, line_id) -> y_offset.
     """
+    if graph.line_offset:
+        offset_step = graph.line_offset
     ctx = _build_offset_ctx(graph, offset_step)
     _compute_base_offsets(ctx)
     _reindex_section_local(ctx)

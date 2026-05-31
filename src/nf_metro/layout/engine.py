@@ -1627,7 +1627,7 @@ def _align_row_y_grids(
                 if not st.is_port and st.y in _multi_ys:
                     max_lines = max(max_lines, len(graph.station_lines(st.id)))
         min_track_gap = (
-            (max_lines - 1) * OFFSET_STEP
+            (max_lines - 1) * (graph.line_offset or OFFSET_STEP)
             + 2 * STATION_RADIUS_APPROX
             + LABEL_OFFSET
             + FONT_HEIGHT

@@ -129,7 +129,8 @@ edge, giving enough horizontal run for smooth curves at bypass route
 corners.  Derived as 4 * CURVE_RADIUS."""
 
 OFFSET_STEP: float = 3.0
-"""Per-line offset increment for parallel lines in bundles."""
+"""Per-line offset increment for parallel lines in bundles (default; override
+per-map with the ``%%metro line_offset:`` directive)."""
 
 COORD_TOLERANCE: float = 1.0
 """Tolerance for coordinate comparison (same X or same Y)."""

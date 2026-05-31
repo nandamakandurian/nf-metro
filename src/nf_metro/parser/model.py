@@ -186,6 +186,9 @@ class MetroGraph:
     line_order: str = "definition"  # "definition" or "span"
     diamond_style: str = "straight"  # "straight" or "symmetric"
     compact_offsets: bool = False
+    # Per-line track separation (px) for parallel bundles & forks. None -> use
+    # the OFFSET_STEP default. Larger values de-squish dense bundles/forks.
+    line_offset: float | None = None
     center_ports: bool = False
     legend_position: str = "bottom"
     legend_min_height: float = 0.0

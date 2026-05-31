@@ -1077,12 +1077,17 @@ def card_block_width(card_lines: list[str], base_font: float = FONT_HEIGHT) -> f
     for raw in card_lines:
         _, s = _card_line_text(raw)
         scale = CARD_FONT_SCALE
+        bold = False
         if s.startswith("# "):
-            s, scale = s[2:], CARD_HEADER_SCALE
+            s, scale, bold = s[2:], CARD_HEADER_SCALE, True
         elif s.startswith("## "):
-            s, scale = s[3:], CARD_SUBHEADER_SCALE
+            s, scale, bold = s[3:], CARD_SUBHEADER_SCALE, True
         elif s == "---":
             continue
+        elif s.startswith("**") and s.endswith("**"):
+            bold = True
         s = s.replace("**", "").replace("__", "").replace("*", "")
-        widest = max(widest, len(s) * char_w * scale)
-    return widest
+        # Bold glyphs run wider; add a safety margin so long lines never clip.
+        per_char = char_w * scale * (1.12 if bold else 1.0)
+        widest = max(widest, len(s) * per_char)
+    return widest * 1.08

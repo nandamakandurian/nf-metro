@@ -2,6 +2,13 @@
 
 **[Documentation](https://pinin4fjords.github.io/nf-metro/latest/)**
 
+> **Fork note** — this is the DurianPay fork of
+> [`pinin4fjords/nf-metro`](https://github.com/pinin4fjords/nf-metro). It adds the
+> `%%metro line_offset:` directive (per-map track spacing) and an
+> [AI-authoring quickstart](#authoring-maps-with-an-ai-agent) so an agent can go
+> from a domain description to a valid `.mmd` without reading layout internals.
+> Used by `durian-oracle`'s `wiki/flows/` layer.
+
 Generate metro-map-style SVG diagrams from Mermaid graph definitions with `%%metro` directives. Designed for visualizing bioinformatics pipeline workflows (e.g., nf-core pipelines) as transit-style maps where each analysis route is a colored "metro line."
 
 <picture>
@@ -59,6 +66,106 @@ Inspect structure (sections, lines, stations):
 ```bash
 nf-metro info examples/simple_pipeline.mmd
 ```
+
+## Authoring maps with an AI agent
+
+> This section is a self-contained quickstart for an LLM agent that has been
+> handed a domain (a pipeline, a money flow, an ops process) and needs to emit a
+> **valid, well-laid-out `.mmd`** without reading the layout source. Read this
+> section + the directive table + one example and you have enough to author.
+
+### The whole model in three primitives
+
+A metro map is exactly three kinds of thing:
+
+1. **Lines** — the colored *routes*. A line is anything a reader traces
+   end-to-end and asks "where does *this one* go?". (A pipeline variant, a
+   payment method, an exception class.) Declared once globally.
+2. **Sections + stations** — the *places*. A `subgraph` is a section (a stage /
+   service / actor); the nodes inside are stations. A section with one station is
+   fine and common.
+3. **Edges** — the *hops*. `a -->|line1,line2| b` says "these lines travel from
+   a to b". The line list on an edge is an assertion: exactly those routes take
+   this hop.
+
+That is the entire conceptual surface. Everything else is layout hinting.
+
+### Author nodes by port-role (the reliable pattern)
+
+The single most common cause of an ugly map is inflow and outflow sharing a
+side, or a line passing *under* a node it shouldn't touch. Avoid both by giving
+every node a **role** and setting its `entry:`/`exit:` hints from the role:
+
+| Role | Ports | Use for |
+|------|-------|---------|
+| **source** | exit right only | upstream origins (providers, inputs, "already here") |
+| **through** | entry left → exit right | a step *every* line on it passes through |
+| **branch** | entry left → exit right, **members only** | a step only *some* lines take; non-members route around it |
+| **sink** | entry left only | terminal states (dead-ends, outputs) |
+
+Two invariants this enforces, and that you should be able to defend for every node:
+
+- **Direction**: inflow and outflow never share a side.
+- **Ownership**: a node sits only on the lines it actually serves; give each node
+  its own `subgraph` and route *only* member lines through it. Non-members bypass.
+
+A clean way to author at scale is to keep the role model as data (lines, typed
+nodes, edges) and emit the `.mmd` from it, so the invariants hold by
+construction rather than by hand. See
+[`examples/`](examples/) for hand-written maps and the directive table below for
+every knob.
+
+### Minimal complete example
+
+```
+%%metro title: Tiny flow
+%%metro style: light
+%%metro legend: right
+%%metro line: a | Route A | #0064B0
+%%metro line: b | Route B | #E2231A
+
+graph LR
+    subgraph src [Source]
+        %%metro exit: right | a,b
+        src_n[inputs]
+    end
+    subgraph work [Process]
+        %%metro entry: left | a,b
+        %%metro exit: right | a,b
+        work_n[do the thing]
+    end
+    subgraph done [Done]
+        %%metro entry: left | a,b
+        done_n[result]
+    end
+
+    src_n -->|a,b| work_n
+    work_n -->|a,b| done_n
+```
+
+### The author → validate → render loop
+
+```bash
+nf-metro validate flow.mmd   # parse + structural checks, no output. Fix errors first.
+nf-metro info flow.mmd        # echo parsed sections / lines / stations to confirm intent
+nf-metro render flow.mmd -o flow.svg  --theme light
+nf-metro render flow.mmd -o flow.html --format html --theme light   # interactive: click a legend line to isolate it
+```
+
+Always `validate` before `render`. If a dense map with few lines looks squished,
+spread the parallel tracks with `%%metro line_offset: <px>` (see directive table).
+
+### Layout knobs you will actually reach for
+
+- `%%metro grid: <section> | col,row` — pin a section when auto-layout places it
+  awkwardly. Most maps need none.
+- `%%metro line_offset: <px>` — per-map track separation for parallel bundles /
+  forks. Raise it (e.g. `11`) to de-squish dense maps.
+- `%%metro compact_offsets: true` — compact per-station offsets; good for dense
+  maps with few lines.
+- `%%metro line_order: span` — give longest-spanning lines the inner tracks.
+- Line style 4th field — `dashed` / `dotted` to mark exceptional routes
+  (unconfirmed, fallback, side-paths) so the eye separates them from the happy path.
 
 ## CLI reference
 
@@ -315,6 +422,7 @@ These are automatically rewritten into port-to-port connections with junction st
 | `%%metro files: <station> \| <label>` | Global | Mark a station with a stacked-documents icon (e.g. paired files) |
 | `%%metro dir: <station> \| <label>` | Global | Mark a station with a folder icon (e.g. output directory) |
 | `%%metro compact_offsets: true` | Global | Use compact per-station offsets instead of global line-priority slots (better for dense maps with few lines) |
+| `%%metro line_offset: <px>` | Global | Per-line track separation for parallel bundles & forks (overrides the `OFFSET_STEP` default). Larger values de-squish dense maps. _(DurianPay fork addition.)_ |
 | `%%metro legend_min_height: <pixels>` | Global | Minimum legend content height in pixels (useful for single-line maps where the logo would otherwise be tiny) |
 | `%%metro entry: <side> \| <lines>` | Section | Entry port hint |
 | `%%metro exit: <side> \| <lines>` | Section | Exit port hint |

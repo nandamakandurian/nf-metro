@@ -319,11 +319,17 @@ def render_svg(
     )
 
     # Attach station notes to their placements so they render as smaller
-    # secondary text below the label.
+    # secondary text below the label. A noted station is forced to a
+    # below-label so the note sits cleanly beneath the name rather than
+    # overlapping it (an above-label has the station marker directly below).
     for lp in labels:
         station = graph.stations.get(lp.station_id)
         if station and station.note:
             lp.note = station.note
+            if lp.above and not lp.dominant_baseline:
+                offset = abs(lp.y - station.y) or 20.0
+                lp.y = station.y + offset
+                lp.above = False
 
     max_x, max_y = _compute_canvas_bounds(graph, routes, debug)
 

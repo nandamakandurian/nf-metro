@@ -58,6 +58,10 @@ class Station:
 
     id: str
     label: str
+    # Optional secondary annotation rendered as smaller text below the label
+    # (e.g. the concrete table / topic / config key / queue a step touches).
+    # May contain "\n" for multiple small lines. Set via `%%metro note:`.
+    note: str = ""
     section_id: str | None = None
     is_port: bool = False
     is_hidden: bool = False
@@ -201,6 +205,8 @@ class MetroGraph:
     _pending_terminus: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
     # Pending off-track marks: station_ids to lift above section top track
     _pending_off_track: list[str] = field(default_factory=list)
+    # Pending station notes: station_id -> secondary annotation text
+    _pending_notes: dict[str, str] = field(default_factory=dict)
     # Lazy caches keyed off the edge list; invalidated on edge mutation.
     _station_lines_cache: dict[str, list[str]] | None = field(default=None, repr=False)
     _edges_from_cache: dict[str, list[Edge]] | None = field(default=None, repr=False)

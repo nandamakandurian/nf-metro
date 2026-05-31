@@ -175,6 +175,12 @@ def parse_metro_mermaid(text: str, max_station_columns: int = 15) -> MetroGraph:
         if station:
             station.off_track = True
 
+    # Apply pending station notes (secondary small-text annotations)
+    for station_id, note in graph._pending_notes.items():
+        station = graph.stations.get(station_id)
+        if station:
+            station.note = note
+
     return graph
 
 
@@ -256,6 +262,14 @@ def _parse_directive(
     elif content.startswith("off_track:"):
         ids = [s.strip() for s in content[len("off_track:") :].split(",")]
         graph._pending_off_track.extend(sid for sid in ids if sid)
+    elif content.startswith("note:"):
+        # note: <station_id> | <secondary text>  (text may contain "\n")
+        rest = content[len("note:") :].strip()
+        if "|" in rest:
+            sid, text = rest.split("|", 1)
+            sid = sid.strip()
+            if sid:
+                graph._pending_notes[sid] = text.strip().replace("\\n", "\n")
     elif ":" in content and content.split(":", 1)[0] in VALID_ICON_TYPES:
         icon_type, rest = content.split(":", 1)
         parts = rest.strip().split("|")

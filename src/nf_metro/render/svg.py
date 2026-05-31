@@ -47,6 +47,8 @@ from nf_metro.render.constants import (
     LEGEND_GAP,
     LEGEND_INSET,
     LOGO_Y_STANDALONE,
+    NOTE_FONT_SCALE,
+    NOTE_GAP,
     SECTION_BOX_RADIUS,
     SECTION_LABEL_REGION_RATIO,
     SECTION_LABEL_TEXT_OFFSET,
@@ -315,6 +317,13 @@ def render_svg(
         icon_obstacles=icon_obstacles,
         routes=routes,
     )
+
+    # Attach station notes to their placements so they render as smaller
+    # secondary text below the label.
+    for lp in labels:
+        station = graph.stations.get(lp.station_id)
+        if station and station.note:
+            lp.note = station.note
 
     max_x, max_y = _compute_canvas_bounds(graph, routes, debug)
 
@@ -1080,6 +1089,31 @@ def _render_labels(
                     dominant_baseline=baseline,
                     line_height=LABEL_LINE_HEIGHT,
                     **label_data,
+                )
+            )
+
+        # Secondary note: smaller text rendered below the label's text block.
+        if label.note:
+            line_spacing = theme.label_font_size * LABEL_LINE_HEIGHT
+            if label.dominant_baseline == "central":
+                block_bottom = y + n_lines * line_spacing / 2
+            elif label.above:
+                block_bottom = label.y
+            else:
+                block_bottom = y + n_lines * line_spacing
+            d.append(
+                draw.Text(
+                    label.note,
+                    theme.label_font_size * NOTE_FONT_SCALE,
+                    label.x,
+                    block_bottom + NOTE_GAP,
+                    fill=theme.label_color,
+                    fill_opacity=0.7,
+                    font_family=theme.label_font_family,
+                    text_anchor="middle",
+                    dominant_baseline="hanging",
+                    line_height=LABEL_LINE_HEIGHT,
+                    class_="nf-metro-station-note",
                 )
             )
 

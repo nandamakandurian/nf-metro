@@ -61,6 +61,8 @@ class LabelPlacement:
     text_anchor: str = "middle"
     dominant_baseline: str = ""  # Empty means use above/below logic
     obstacle_bbox: tuple[float, float, float, float] | None = None
+    # Optional secondary annotation rendered as smaller text below the label.
+    note: str = ""
 
 
 def _label_bbox(

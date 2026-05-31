@@ -100,6 +100,16 @@ math and render placement share a single source of truth."""
 ICON_NAME_FONT_SCALE: float = 0.6
 """Caption font size as a fraction of the theme label font size."""
 
+NOTE_FONT_SCALE: float = 0.72
+"""Station-note font size as a fraction of the theme label font size.
+
+A station note (``%%metro note:``) renders as smaller secondary text below the
+station label — used for the concrete table / topic / config key / queue a step
+touches, without crowding the primary label."""
+
+NOTE_GAP: float = 3.0
+"""Vertical gap between the bottom of a station label and its note text."""
+
 # ---------------------------------------------------------------------------
 # Animation
 # ---------------------------------------------------------------------------
